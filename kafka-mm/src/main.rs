@@ -4,7 +4,7 @@ use futures::stream::StreamExt;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::stream_consumer::StreamConsumer;
 use rdkafka::consumer::{CommitMode, Consumer};
-use rdkafka::message::OwnedMessage;
+use rdkafka::message::{OwnedMessage};
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::util::Timeout;
 use rdkafka::Offset;
@@ -16,34 +16,41 @@ use tokio_stream::wrappers::{IntervalStream, ReceiverStream};
 
 #[tokio::main]
 async fn main() {
-    let brokers = String::from("kafka:9092");
-    let group_id = String::from("rust-test-group");
-    let input_topic = String::from("test-topic");
-    let output_topic = String::from("rust-output-topic");
+    let consumer_brokers = String::from("kafka:9092");
+    let producer_brokers = consumer_brokers.clone();
+    let group_id = String::from("azsigmond-test-group");
+    let input_topic = String::from("azsigmond-test");
+    let output_topic = String::from("azsigmond-test2");
+    let commit_interval_ms = 1000;
+    let auto_offset_reset = String::from("earliest");
 
-    let (consumed_messages, producer_input_messages) = mpsc::channel(4096);
-    let (commit_messages_sender, commit_messages_receiver) = mpsc::channel(4096);
-    tokio::spawn(run_consumer(
-        brokers.clone(),
-        group_id.clone(),
-        input_topic.clone(),
-        consumed_messages.clone(),
-        commit_messages_receiver,
-    ));
+    let (consumed_messages, producer_input_messages) = mpsc::channel(256);
+    let (commit_messages_sender, commit_messages_receiver) = mpsc::channel(256);
 
     tokio::spawn(run_producer(
-        brokers,
+        producer_brokers,
         output_topic,
         producer_input_messages,
         commit_messages_sender,
     ));
-    consumed_messages.closed().await
+
+    run_consumer(
+        consumer_brokers,
+        group_id,
+        input_topic,
+        commit_interval_ms,
+        auto_offset_reset,
+        consumed_messages,
+        commit_messages_receiver,
+    ).await;
 }
 
 async fn run_consumer(
     brokers: String,
     group_id: String,
     input_topic: String,
+    commit_interval_ms: u64,
+    auto_offset_reset: String,
     consumer_messages_sender: Sender<OwnedMessage>,
     commits_receiver: Receiver<OwnedMessage>,
 ) {
@@ -53,6 +60,7 @@ async fn run_consumer(
         .set("enable.partition.eof", "false")
         .set("session.timeout.ms", "6000")
         .set("enable.auto.commit", "false")
+        .set("auto.offset.reset", auto_offset_reset)
         .create()
         .expect("Consumer creation failed");
 
@@ -65,16 +73,18 @@ async fn run_consumer(
     });
     let commits_stream = ReceiverStream::new(commits_receiver)
         .map(|x| ConsumerThreadTrigger::MessageDoneProcessing(x));
-    let commits_trigger_stream = create_clock();
+    let commits_trigger_stream = create_periodic_commit_trigger(commit_interval_ms);
 
-    let mut consumer_stream = select(
-        consuming_stream,
-        select(commits_stream, commits_trigger_stream),
-    );
+    let mut consumer_stream = {
+        select(
+            consuming_stream,
+            select(commits_stream, commits_trigger_stream),
+        )
+    };
     let mut offsets = TopicPartitionList::new();
 
-    while let Some(trigger) = consumer_stream.next().await {
-        match trigger {
+    while let Some(trig) = consumer_stream.next().await {
+        match trig {
             ConsumerThreadTrigger::MessageToConsume(msg) => {
                 consumer_messages_sender
                     .send(msg)
@@ -82,8 +92,9 @@ async fn run_consumer(
                     .expect("internal channel error");
             }
             ConsumerThreadTrigger::MessageDoneProcessing(x) => {
+                let offset_to_consume_from = x.offset() + 1;
                 offsets
-                    .add_partition_offset(x.topic(), x.partition(), Offset::Offset(x.offset()))
+                    .add_partition_offset(x.topic(), x.partition(), Offset::Offset(offset_to_consume_from))
                     .expect("error while updating commit offset batch");
             }
             ConsumerThreadTrigger::TimerEvent => {
@@ -97,6 +108,7 @@ async fn run_consumer(
         }
     }
 }
+
 async fn run_producer(
     brokers: String,
     output_topic: String,
@@ -144,12 +156,11 @@ async fn handle_message(
         .expect("internal channel error on commits");
 }
 
-fn create_clock() -> Map<IntervalStream, fn(tokio::time::Instant) -> ConsumerThreadTrigger> {
-    let commit_interval_ms = 1000;
+fn create_periodic_commit_trigger(commit_interval_ms: u64) -> Map<IntervalStream, fn(tokio::time::Instant) -> ConsumerThreadTrigger> {
     let interval = time::interval(time::Duration::from_millis(commit_interval_ms));
     IntervalStream::new(interval).map(|_x| ConsumerThreadTrigger::TimerEvent)
 }
-
+#[derive(Debug)]
 enum ConsumerThreadTrigger {
     MessageToConsume(OwnedMessage),
     MessageDoneProcessing(OwnedMessage),
