@@ -1,5 +1,6 @@
 [package]
-name = "sha256sum"
+edition = "2021"
+name = "rust-playground"
 version = "0.1.0"
 authors = ["zsedem"]
 
