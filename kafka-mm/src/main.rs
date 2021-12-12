@@ -13,16 +13,68 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time;
 use tokio_stream::wrappers::{IntervalStream, ReceiverStream};
+use clap::{Arg, App, AppSettings};
 
 #[tokio::main]
 async fn main() {
-    let consumer_brokers = String::from("kafka:9092");
-    let producer_brokers = consumer_brokers.clone();
-    let group_id = String::from("azsigmond-test-group");
-    let input_topic = String::from("azsigmond-test");
-    let output_topic = String::from("azsigmond-test2");
-    let commit_interval_ms = 1000;
-    let auto_offset_reset = String::from("earliest");
+    let matches = App::new("Kafka Mirrormaker")
+        .version("0.1.0")
+        .about("Mirrors from one kafka to another")
+        .setting(AppSettings::ColorAuto)
+        .arg(Arg::with_name("source-kafka")
+            .long("source-bootstrap-servers")
+            .value_name("KAFKA_BOOTSTRAP_SERVERS")
+            .help("Set to a kafka bootstrap server, where you read the topic from")
+            .required(true)
+            .takes_value(true))
+        .arg(Arg::with_name("source-kafka-topic")
+            .long("source-kafka-topic")
+            .value_name("KAFKA_TOPIC")
+            .help("Set the topic to mirror from")
+            .required(true)
+            .takes_value(true))
+        .arg(Arg::with_name("consumer-group-id")
+            .long("consumer-group-id")
+            .value_name("CONSUMER_GROUP")
+            .help("Set the topic to mirror from")
+            .required(true)
+            .takes_value(true))
+        .arg(Arg::with_name("target-kafka")
+            .long("target-bootstrap-servers")
+            .value_name("KAFKA_BOOTSTRAP_SERVERS")
+            .help("Set to a kafka bootstrap server, where you write the topic")
+            .required(true)
+            .takes_value(true))
+        .arg(Arg::with_name("target-kafka-topic")
+            .long("target-kafka-topic")
+            .value_name("KAFKA_TOPIC")
+            .help("Set the topic to mirror to")
+            .required(true)
+            .takes_value(true))
+        .arg(Arg::with_name("commit-interval-ms")
+            .long("commit-interval-ms")
+            .value_name("MILLIS")
+            .help("Commit interval milliseconds")
+            .takes_value(true)
+            .default_value("1000"))
+        .arg(Arg::with_name("auto-offset-reset")
+            .long("auto-offset-reset")
+            .value_name("RESET_OPTION")
+            .help("kafka auto.offset.reset option")
+            .takes_value(true)
+            .possible_values(&vec!["earliest", "latest"])
+            .default_value("earliest"))
+        .get_matches();
+
+
+    let consumer_brokers = String::from(matches.value_of("source-bootstrap-servers").expect("ArgumentError"));
+    let producer_brokers = String::from(matches.value_of("target-bootstrap-servers").expect("ArgumentError"));
+    let group_id = String::from(matches.value_of("consumer-group-id").expect("ArgumentError"));
+    let input_topic = String::from(matches.value_of("source-kafka-topic").expect("ArgumentError"));
+    let output_topic = String::from(matches.value_of("target-bootstrap-servers").expect("ArgumentError"));
+    let commit_interval_ms = matches.value_of("commit-interval-ms").expect("ArgumentError").parse()
+        .expect("Commit interval milliseconds must be a positive number");
+    let auto_offset_reset =  String::from(matches.value_of("auto-offset-reset").expect("ArgumentError"));
 
     let (consumed_messages, producer_input_messages) = mpsc::channel(256);
     let (commit_messages_sender, commit_messages_receiver) = mpsc::channel(256);
